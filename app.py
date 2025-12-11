@@ -7,42 +7,28 @@ from playwright.sync_api import sync_playwright
 app = Flask(__name__)
 
 # ==========================================
-# 0. 【核心新增】程序启动时，自动安装字体
+# 0. 启动时自动安装字体 (保留这个功能，防止乱码)
 # ==========================================
 def install_fonts_at_startup():
     print("📦 正在初始化字体环境...")
     try:
-        # 1. 确定路径
         base_dir = os.path.dirname(os.path.abspath(__file__))
         local_fonts_dir = os.path.join(base_dir, 'fonts')
-        
-        # Linux 用户字体目录
         system_font_dir = os.path.expanduser("~/.fonts")
         
-        # 2. 创建系统目录
         if not os.path.exists(system_font_dir):
             os.makedirs(system_font_dir)
-            print(f"📂 创建目录: {system_font_dir}")
 
-        # 3. 拷贝字体 (使用 cp 命令)
-        # 注意：这里直接执行 Linux 命令，比 Python 复制更快更稳
         if os.path.exists(local_fonts_dir):
-            cmd = f"cp {local_fonts_dir}/* {system_font_dir}/"
-            subprocess.run(cmd, shell=True, check=True)
-            print(f"✅ 已拷贝字体文件到系统目录")
-            
-            # 4. 刷新缓存
-            subprocess.run("fc-cache -fv", shell=True, check=True)
-            print("✅ 字体缓存刷新成功！系统已识别字体。")
+            subprocess.run(f"cp {local_fonts_dir}/* {system_font_dir}/", shell=True)
+            subprocess.run("fc-cache -fv", shell=True)
+            print("✅ 字体安装成功")
         else:
-            print("⚠️ 警告: 没找到 fonts 文件夹，跳过字体安装。")
-
+            print("⚠️ 未找到 fonts 文件夹，跳过安装")
     except Exception as e:
         print(f"❌ 字体安装出错: {e}")
 
-# 启动时立即执行安装
 install_fonts_at_startup()
-
 
 # ==========================================
 # 1. HTML 界面
@@ -53,10 +39,10 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>网页转 PDF (自动修复版)</title>
+    <title>网页转 PDF (高保真还原版)</title>
     <style>
         :root { --apple-blue: #0071e3; --apple-gray: #f5f5f7; --text: #1d1d1f; }
-        body { font-family: "Noto Sans CJK SC", "Source Han Sans CN", -apple-system, sans-serif; background: var(--apple-gray); color: var(--text); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        body { font-family: "Noto Sans CJK SC", -apple-system, sans-serif; background: var(--apple-gray); color: var(--text); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .container { background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); width: 100%; max-width: 500px; text-align: center; }
         h1 { font-weight: 600; margin-bottom: 30px; }
         input { width: 90%; padding: 15px; border: 1px solid #d2d2d7; border-radius: 12px; font-size: 16px; margin-bottom: 20px; outline: none; }
@@ -66,13 +52,13 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>网页转 PDF</h1>
+        <h1>网页转 PDF (原貌还原)</h1>
         <form method="POST" onsubmit="document.getElementById('msg').style.display='block';">
             <input type="text" name="url" placeholder="粘贴网址..." required>
             <br>
             <button type="submit">生成并下载</button>
         </form>
-        <div class="loading" id="msg">正在生成中，请耐心等待...</div>
+        <div class="loading" id="msg">正在高保真渲染，可能需要 30 秒...</div>
     </div>
 </body>
 </html>
@@ -104,28 +90,47 @@ def generate_pdf(url):
     filepath = os.path.join(DOWNLOAD_FOLDER, filename)
     
     with sync_playwright() as p:
-        # 启动浏览器
         browser = p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage']
         )
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        # 1. 设置更大的视口，确保网页认为是“桌面电脑”在访问
+        context = browser.new_context(
+            viewport={'width': 1600, 'height': 1200},
+            device_scale_factor=2 # 类似于 Retina 屏幕，图片更清晰
+        )
         page = context.new_page()
         
+        print(f"🚀 访问: {url}")
         page.goto(url, wait_until='networkidle', timeout=60000)
         
-        # 强制指定字体（精确匹配文件名）
+        # 2. 【关键】强制模拟“屏幕显示” (解决排版错乱的核心)
+        # 这会让网页觉得它还在屏幕上，而不是在打印机里
+        page.emulate_media(media="screen")
+        
+        # 注入字体样式 (双保险)
         page.add_style_tag(content="""
             body, h1, h2, h3, h4, h5, h6, p, div, span, a {
-                font-family: 'Noto Sans CJK SC', 'Noto Sans SC', sans-serif !important;
+                font-family: 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif !important;
             }
+            /* 隐藏一些常见的浮动广告 */
+            .ad-banner, .popup, .cookie-consent { display: none !important; }
         """)
         
-        time.sleep(1)
+        # 滚动页面以触发懒加载
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(2)
+        page.evaluate("window.scrollTo(0, 0)") # 滚回去，准备截图
+        time.sleep(1)
         
-        page.pdf(path=filepath, format="A4", print_background=True)
+        print("🖨️ 生成 PDF...")
+        page.pdf(
+            path=filepath,
+            format="A4",
+            print_background=True, # 必须开启背景打印
+            scale=0.6,             # 【关键】缩放 60% 以便把宽屏内容塞进 A4 纸，避免挤压
+            margin={"top": "0.5cm", "bottom": "0.5cm", "left": "0.5cm", "right": "0.5cm"}
+        )
         browser.close()
             
     return filepath
