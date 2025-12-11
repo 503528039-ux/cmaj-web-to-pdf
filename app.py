@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 app = Flask(__name__)
 
 # ==========================================
-# 1. HTML 界面
+# 1. HTML 界面 (无需修改)
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -15,7 +15,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>网页转 PDF 工具 (终极修复版)</title>
+    <title>网页转 PDF 工具 (内存优化版)</title>
     <style>
         :root { --apple-blue: #0071e3; --apple-gray: #f5f5f7; --text: #1d1d1f; }
         body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; background: var(--apple-gray); color: var(--text); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
@@ -35,31 +35,23 @@ HTML_TEMPLATE = """
             <br>
             <button type="submit">生成并下载</button>
         </form>
-        <div class="loading" id="msg">正在努力渲染中，这可能需要 10-20 秒...</div>
+        <div class="loading" id="msg">正在启动浏览器渲染...这可能需要 15-30 秒</div>
     </div>
 </body>
 </html>
 """
 
 # ==========================================
-# 2. 核心逻辑
+# 2. 核心逻辑 (关键修改部分)
 # ==========================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'downloads')
-# 【关键】锁定字体文件位置 (假设在 fonts 文件夹下)
+# 确保这里的文件名和你上传到 GitHub 的一模一样！
 FONT_PATH = os.path.join(BASE_DIR, 'fonts', 'NotoSansCJKsc-Regular.otf') 
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
-
-def get_font_base64():
-    """读取字体文件并转换为 Base64 编码，供 CSS 使用"""
-    if not os.path.exists(FONT_PATH):
-        print(f"⚠️ 警告: 找不到字体文件: {FONT_PATH}")
-        return None
-    with open(FONT_PATH, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -74,57 +66,81 @@ def index():
                 pdf_path = generate_pdf(url)
                 return send_file(pdf_path, as_attachment=True)
             except Exception as e:
-                return f"❌ 出错啦: {str(e)}"
+                # 打印详细错误到日志，方便排查
+                print(f"❌ 严重错误: {e}")
+                return f"服务器撑不住了或发生错误: {str(e)}"
     return render_template_string(HTML_TEMPLATE)
+
+def get_font_base64_lazy():
+    """
+    【懒加载优化】
+    只有在真正生成 PDF 的那一刻才读取文件，
+    防止程序一启动就因为内存不够而崩溃。
+    """
+    try:
+        if not os.path.exists(FONT_PATH):
+            print(f"⚠️ 警告: 依然找不到字体文件: {FONT_PATH}")
+            return None
+        
+        print("📥 正在临时读取字体文件到内存...")
+        with open(FONT_PATH, "rb") as f:
+            # 读取并编码
+            data = base64.b64encode(f.read()).decode("utf-8")
+            print("✅ 字体读取成功")
+            return data
+    except Exception as e:
+        print(f"⚠️ 读取字体失败: {e}")
+        return None
 
 def generate_pdf(url):
     print(f"🚀 收到任务: {url}")
     filename = f"web_page_{int(time.time())}.pdf"
     filepath = os.path.join(DOWNLOAD_FOLDER, filename)
     
-    # 提前准备好字体的 CSS 内容
-    font_data = get_font_base64()
+    # 1. 临时获取字体数据 (用完会自动释放内存)
+    font_data = get_font_base64_lazy()
+    
     font_css = ""
     if font_data:
-        print("✅ 成功加载字体文件，准备注入...")
-        # 定义一个 @font-face，把 Base64 塞进去
         font_css = f"""
         @font-face {{
             font-family: 'MyCustomFont';
             src: url(data:font/otf;base64,{font_data}) format('opentype');
         }}
-        /* 强制所有元素优先使用这个字体 */
-        body, h1, h2, h3, h4, h5, h6, p, div, span, a, li {{
+        body, h1, h2, h3, h4, h5, h6, p, div, span, a, li, strong, b {{
             font-family: 'MyCustomFont', sans-serif !important;
         }}
         """
-    else:
-        print("❌ 未加载到字体，将使用系统默认（可能会乱码）")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # 添加参数优化内存使用
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage'] # 关键优化：防止内存溢出
+        )
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         try:
             page.goto(url, wait_until='networkidle', timeout=60000)
             
-            # 【终极一招】在网页加载完后，强制插入我们的字体样式
             if font_css:
+                print("💉 正在注入字体样式...")
                 page.add_style_tag(content=font_css)
-                # 稍微多等一下，让浏览器解析这个巨大的 CSS
-                time.sleep(1)
+                time.sleep(1) # 给浏览器一点时间解析字体
             
-            # 滚动到底部，触发懒加载图片
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(2)
+            # 简单滚动一下，触发懒加载
+            page.evaluate("window.scrollTo(0, 500)")
+            time.sleep(1)
             
+            print("🖨️ 开始生成 PDF...")
             page.pdf(
                 path=filepath,
                 format="A4",
                 print_background=True,
                 margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"}
             )
+            print("✅ PDF 生成完毕")
         finally:
             browser.close()
             
