@@ -1,12 +1,13 @@
 import os
 import time
+import base64
 from flask import Flask, render_template_string, request, send_file
 from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
 # ==========================================
-# 1. 这里是 HTML 界面代码
+# 1. HTML 界面
 # ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -14,14 +15,13 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>网页转 PDF 工具</title>
+    <title>网页转 PDF 工具 (终极修复版)</title>
     <style>
         :root { --apple-blue: #0071e3; --apple-gray: #f5f5f7; --text: #1d1d1f; }
         body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; background: var(--apple-gray); color: var(--text); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .container { background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); width: 100%; max-width: 500px; text-align: center; }
         h1 { font-weight: 600; margin-bottom: 30px; }
         input { width: 90%; padding: 15px; border: 1px solid #d2d2d7; border-radius: 12px; font-size: 16px; margin-bottom: 20px; outline: none; }
-        input:focus { border-color: var(--apple-blue); box-shadow: 0 0 0 4px rgba(0,113,227,0.1); }
         button { background: var(--apple-blue); color: white; border: none; padding: 15px 40px; border-radius: 99px; font-size: 16px; cursor: pointer; }
         button:hover { opacity: 0.9; }
         .loading { display: none; margin-top: 20px; color: #86868b; }
@@ -31,45 +31,50 @@ HTML_TEMPLATE = """
     <div class="container">
         <h1>网页转 PDF</h1>
         <form method="POST" onsubmit="document.getElementById('msg').style.display='block';">
-            <input type="text" name="url" placeholder="粘贴网址 (例如 https://www.apple.com.cn)" required>
+            <input type="text" name="url" placeholder="粘贴网址 (例如 https://mp.weixin.qq.com/...)" required>
             <br>
             <button type="submit">生成并下载</button>
         </form>
-        <div class="loading" id="msg">正在启动浏览器生成 PDF，请稍候...</div>
+        <div class="loading" id="msg">正在努力渲染中，这可能需要 10-20 秒...</div>
     </div>
 </body>
 </html>
 """
 
 # ==========================================
-# 2. 这里是 Python 后端逻辑
+# 2. 核心逻辑
 # ==========================================
 
-# 获取当前脚本所在目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'downloads')
+# 【关键】锁定字体文件位置 (假设在 fonts 文件夹下)
+FONT_PATH = os.path.join(BASE_DIR, 'fonts', 'NotoSansCJKsc-Regular.otf') 
+
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
+
+def get_font_base64():
+    """读取字体文件并转换为 Base64 编码，供 CSS 使用"""
+    if not os.path.exists(FONT_PATH):
+        print(f"⚠️ 警告: 找不到字体文件: {FONT_PATH}")
+        return None
+    with open(FONT_PATH, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         url = request.form.get('url')
         if url:
-            # === 自动修复网址逻辑 ===
-            url = url.strip() # 去除首尾空格
-            if url.startswith('ps://'): # 修复你刚才遇到的 ps:// 错误
-                url = 'htt' + url
-            elif not url.startswith('http'): # 如果忘记写 http，自动补全
-                url = 'https://' + url
-            # ====================
-
+            url = url.strip()
+            if url.startswith('ps://'): url = 'htt' + url
+            elif not url.startswith('http'): url = 'https://' + url
+            
             try:
                 pdf_path = generate_pdf(url)
                 return send_file(pdf_path, as_attachment=True)
             except Exception as e:
                 return f"❌ 出错啦: {str(e)}"
-    
     return render_template_string(HTML_TEMPLATE)
 
 def generate_pdf(url):
@@ -77,18 +82,43 @@ def generate_pdf(url):
     filename = f"web_page_{int(time.time())}.pdf"
     filepath = os.path.join(DOWNLOAD_FOLDER, filename)
     
+    # 提前准备好字体的 CSS 内容
+    font_data = get_font_base64()
+    font_css = ""
+    if font_data:
+        print("✅ 成功加载字体文件，准备注入...")
+        # 定义一个 @font-face，把 Base64 塞进去
+        font_css = f"""
+        @font-face {{
+            font-family: 'MyCustomFont';
+            src: url(data:font/otf;base64,{font_data}) format('opentype');
+        }}
+        /* 强制所有元素优先使用这个字体 */
+        body, h1, h2, h3, h4, h5, h6, p, div, span, a, li {{
+            font-family: 'MyCustomFont', sans-serif !important;
+        }}
+        """
+    else:
+        print("❌ 未加载到字体，将使用系统默认（可能会乱码）")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 这里的 viewport 决定了网页是以“桌面版”还是“手机版”渲染
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         try:
-            # 访问页面
             page.goto(url, wait_until='networkidle', timeout=60000)
-            time.sleep(2) # 等待动态内容加载
             
-            # 打印 PDF
+            # 【终极一招】在网页加载完后，强制插入我们的字体样式
+            if font_css:
+                page.add_style_tag(content=font_css)
+                # 稍微多等一下，让浏览器解析这个巨大的 CSS
+                time.sleep(1)
+            
+            # 滚动到底部，触发懒加载图片
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2)
+            
             page.pdf(
                 path=filepath,
                 format="A4",
@@ -101,5 +131,4 @@ def generate_pdf(url):
     return filepath
 
 if __name__ == '__main__':
-    print("应用已启动，请在浏览器访问 http://127.0.0.1:5001")
     app.run(debug=True, port=5001)
